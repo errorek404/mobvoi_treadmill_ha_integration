@@ -1,27 +1,12 @@
-# Mobvoi Home Treadmill Plus — Natywna integracja Home Assistant
+# Mobvoi Home Treadmill Plus - Integracja Home Assistant (v1.2.0)
 
-Natywna integracja Bluetooth (FTMS) do bezpośredniej obsługi bieżni **Mobvoi Home Treadmill Plus** w Home Assistant z poziomu panelu UI (*Config Flow* — bez ręcznego edytowania YAML i osobnych skryptów).
+## Co nowego w wersji 1.2.0?
+1. **Przycisk Power (`switch.mobvoi_power`)** – wybudza wyświetlacz i elektronikę bieżni ze stanu uśpienia (wysyłając komendę *Request Control* `0x00` po Bluetooth FTMS) bez natychmiastowego ruszania pasa. Wyłączenie przełącznika zatrzymuje pas i przełącza bieżnię w stan czuwania.
+2. **Przełącznik Start Pasa (`switch.mobvoi_start_pasa`)** – osobny przełącznik do uruchamiania i zatrzymywania samego pasa biegowego.
+3. **Gotowy Dashboard (`dashboard.yaml`)** – kompletny widok z kafelkami Power, Start/Stop, parametrami na żywo, suwakiem prędkości, 4 presetami oraz wykresem.
 
-## Instalacja (przez HACS lub ręcznie)
-
-### Sposób 1: Przez własne repozytorium HACS (zero wgrywania pojedynczych plików)
-1. Wrzuć zawartość tego archiwum na swoje konto GitHub (jako nowe publiczne repozytorium).
-2. W Home Assistant otwórz **HACS** → **Integracje** → menu trzech kropek w prawym górnym rogu → **Niestandardowe repozytoria**.
-3. Wklej adres swojego repozytorium na GitHubie i wybierz kategorię **Integracja**.
-4. Kliknij **Pobierz** i zrestartuj Home Assistant.
-
-### Sposób 2: Rozpakowanie archiwum
-1. Rozpakuj folder `mobvoi_treadmill` do katalogu `/config/custom_components/mobvoi_treadmill` w Home Assistant.
-2. Zrestartuj Home Assistant.
-
-## Konfiguracja w Home Assistant
-1. Włącz bieżnię Mobvoi (musi być w zasięgu Bluetooth Twojego Mini PC).
-2. W Home Assistant wejdź w **Ustawienia** → **Urządzenia oraz usługi**.
-3. Bieżnia powinna zostać wykryta automatycznie u góry ekranu. Jeśli nie, kliknij **+ Dodaj integrację**, wyszukaj **Mobvoi Home Treadmill Plus** i wybierz ją z listy.
-4. Po dodaniu otrzymasz gotowe urządzenie z encjami:
-   - `sensor.mobvoi_home_treadmill_plus_predkosc` (km/h)
-   - `sensor.mobvoi_home_treadmill_plus_dystans` (m)
-   - `sensor.mobvoi_home_treadmill_plus_kalorie` (kcal)
-   - `sensor.mobvoi_home_treadmill_plus_czas_treningu` (s)
-   - `button.mobvoi_home_treadmill_plus_start` / `stop`
-   - `number.mobvoi_home_treadmill_plus_predkosc_docelowa` (suwak 1.0–12.0 km/h)
+## Jak wgrać Dashboard w Home Assistant?
+1. W Home Assistant przejdź do **Ustawienia** -> **Dashboardy** -> **Dodaj dashboard** (np. o nazwie *Bieżnia*).
+2. Otwórz nowy dashboard, kliknij **ikonę ołówka (Edytuj dashboard)** w prawym górnym rogu.
+3. Kliknij **trzy kropki** w prawym górnym rogu -> **Edytor surowej konfiguracji (Raw configuration editor)**.
+4. Wklej zawartość pliku `dashboard.yaml` i kliknij **Zapisz**.
