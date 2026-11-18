@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wybierz bieżnię Mobvoi",
+        "description": "Wybierz wykrytą bieżnię Bluetooth z listy poniżej.",
+        "data": {
+          "address": "Urządzenie Bluetooth"
+        }
+      },
+      "bluetooth_confirm": {
+        "title": "Potwierdź bieżnię Mobvoi",
+        "description": "Czy chcesz skonfigurować {name} ({address})?"
+      }
+    },
+    "abort": {
+      "no_devices_found": "Nie znaleziono żadnych urządzeń Bluetooth. Upewnij się, że bieżnia jest włączona.",
+      "already_configured": "To urządzenie jest już skonfigurowane."
+    }
+  }
+}
