@@ -1,45 +1,38 @@
-from __future__ import annotations
-
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfSpeed
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import MobvoiCoordinator
+from .coordinator import MobvoiTreadmillCoordinator
 
 
 async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    coordinator: MobvoiCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: MobvoiTreadmillCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([MobvoiTargetSpeedNumber(coordinator, entry)])
 
 
-class MobvoiTargetSpeedNumber(CoordinatorEntity[MobvoiCoordinator], NumberEntity):
-    _attr_has_entity_name = True
-    _attr_name = "Prędkość docelowa"
-    _attr_icon = "mdi:run-fast"
-    _attr_native_min_value = 1.0
-    _attr_native_max_value = 12.0
-    _attr_native_step = 0.1
-    _attr_native_unit_of_measurement = UnitOfSpeed.KILOMETERS_PER_HOUR
-    _attr_mode = NumberMode.SLIDER
-
-    def __init__(self, coordinator: MobvoiCoordinator, entry: ConfigEntry) -> None:
+class MobvoiTargetSpeedNumber(CoordinatorEntity, NumberEntity):
+    def __init__(self, coordinator, entry):
         super().__init__(coordinator)
+        self._attr_name = "Mobvoi Prędkość docelowa"
         self._attr_unique_id = f"{entry.entry_id}_target_speed"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, coordinator.address)},
-            name="Mobvoi Home Treadmill Plus",
-            manufacturer="Mobvoi",
-            model="Home Treadmill Plus",
-        )
+        self._attr_native_min_value = 1.0
+        self._attr_native_max_value = 12.0
+        self._attr_native_step = 0.5
+        self._attr_mode = NumberMode.SLIDER
+        self._attr_native_unit_of_measurement = UnitOfSpeed.KILOMETERS_PER_HOUR
+        self._attr_icon = "mdi:run-fast"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)},
+            "name": "Mobvoi Home Treadmill Plus",
+            "manufacturer": "Mobvoi",
+            "model": "T4225 Plus",
+        }
 
     @property
     def native_value(self) -> float:
