@@ -17,31 +17,25 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: MobvoiTreadmillCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([MobvoiWakeButton(coordinator, entry)])
+    async_add_entities([MobvoiEmergencyStopButton(coordinator)])
 
 
-class MobvoiWakeButton(CoordinatorEntity[MobvoiTreadmillCoordinator], ButtonEntity):
+class MobvoiEmergencyStopButton(
+    CoordinatorEntity[MobvoiTreadmillCoordinator], ButtonEntity
+):
     _attr_has_entity_name = True
+    _attr_name = "Stop awaryjny"
+    _attr_icon = "mdi:stop-circle-outline"
 
-    def __init__(
-        self,
-        coordinator: MobvoiTreadmillCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
+    def __init__(self, coordinator: MobvoiTreadmillCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Wybudź bieżnię"
-        self._attr_unique_id = f"{entry.entry_id}_wake_button"
-        self._attr_icon = "mdi:power-standby"
+        self._attr_unique_id = f"{coordinator.address}_emergency_stop"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="Mobvoi Home Treadmill Plus",
+            identifiers={(DOMAIN, coordinator.address)},
+            name=coordinator.device_name,
             manufacturer="Mobvoi",
             model="T4225 Plus",
         )
 
-    @property
-    def available(self) -> bool:
-        return bool(self.coordinator.data.get("connected", False))
-
     async def async_press(self) -> None:
-        await self.coordinator.async_wake_up()
+        await self.coordinator.async_send_stop(emergency=True)

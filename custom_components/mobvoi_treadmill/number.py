@@ -18,36 +18,30 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: MobvoiTreadmillCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([MobvoiTargetSpeedNumber(coordinator, entry)])
+    async_add_entities([MobvoiTargetSpeedNumber(coordinator)])
 
 
-class MobvoiTargetSpeedNumber(CoordinatorEntity[MobvoiTreadmillCoordinator], NumberEntity):
+class MobvoiTargetSpeedNumber(
+    CoordinatorEntity[MobvoiTreadmillCoordinator], NumberEntity
+):
     _attr_has_entity_name = True
+    _attr_name = "Prędkość docelowa"
+    _attr_icon = "mdi:speedometer"
     _attr_native_min_value = 1.0
     _attr_native_max_value = 12.0
     _attr_native_step = 0.1
-    _attr_mode = NumberMode.SLIDER
     _attr_native_unit_of_measurement = UnitOfSpeed.KILOMETERS_PER_HOUR
+    _attr_mode = NumberMode.SLIDER
 
-    def __init__(
-        self,
-        coordinator: MobvoiTreadmillCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
+    def __init__(self, coordinator: MobvoiTreadmillCoordinator) -> None:
         super().__init__(coordinator)
-        self._attr_name = "Prędkość docelowa"
-        self._attr_unique_id = f"{entry.entry_id}_target_speed"
-        self._attr_icon = "mdi:speedometer"
+        self._attr_unique_id = f"{coordinator.address}_target_speed"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="Mobvoi Home Treadmill Plus",
+            identifiers={(DOMAIN, coordinator.address)},
+            name=coordinator.device_name,
             manufacturer="Mobvoi",
             model="T4225 Plus",
         )
-
-    @property
-    def available(self) -> bool:
-        return bool(self.coordinator.data.get("connected", False))
 
     @property
     def native_value(self) -> float:
