@@ -5,6 +5,7 @@ import logging
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -41,6 +42,7 @@ class MobvoiEmergencyStopButton(
             name=entry.title,
             manufacturer="Mobvoi",
             model="Home Treadmill Plus",
+            configuration_url="https://github.com/errorek404/mobvoi_treadmill_ha_integration",
         )
 
     @property
@@ -48,6 +50,7 @@ class MobvoiEmergencyStopButton(
         return self.coordinator.data.get("connected", False)
 
     async def async_press(self) -> None:
-        ok = await self.coordinator.async_send_stop(emergency=True)
-        if not ok:
-            _LOGGER.warning("Nie udało się wykonać zatrzymania awaryjnego bieżni Mobvoi.")
+        if not await self.coordinator.async_send_stop(emergency=True):
+            raise HomeAssistantError(
+                "Nie udało się wykonać zatrzymania awaryjnego bieżni Mobvoi."
+            )

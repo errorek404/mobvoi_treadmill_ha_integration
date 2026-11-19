@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import voluptuous as vol
 
 from homeassistant.components import bluetooth
@@ -17,6 +18,7 @@ class MobvoiTreadmillConfigFlow(ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
         self._discovered_devices: dict[str, str] = {}
+        self._discovered_titles: dict[str, str] = {}
 
     async def async_step_bluetooth(
         self, discovery_info: BluetoothServiceInfoBleak
@@ -53,7 +55,10 @@ class MobvoiTreadmillConfigFlow(ConfigFlow, domain=DOMAIN):
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(address, raise_on_progress=False)
             self._abort_if_unique_id_configured()
-            title = self._discovered_devices.get(address, "Mobvoi Home Treadmill Plus")
+            # FIX: tytuł bez adresu MAC
+            title = self._discovered_titles.get(
+                address, "Mobvoi Home Treadmill Plus"
+            )
             return self.async_create_entry(
                 title=title,
                 data={CONF_ADDRESS: address},
@@ -65,8 +70,19 @@ class MobvoiTreadmillConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             name_lower = (info.name or "").lower()
             has_ftms = FTMS_SERVICE_UUID in [u.lower() for u in info.service_uuids]
-            if has_ftms or "mobvoi" in name_lower or "treadmill" in name_lower or "fs-" in name_lower:
-                self._discovered_devices[info.address] = f"{info.name or 'Mobvoi Treadmill'} ({info.address})"
+            if (
+                has_ftms
+                or "mobvoi" in name_lower
+                or "treadmill" in name_lower
+                or "fs-" in name_lower
+            ):
+                display_name = info.name or "Mobvoi Treadmill"
+                self._discovered_titles[info.address] = display_name
+                # W dropdownie pokazujemy z adresem (żeby rozróżnić duplikaty),
+                # ale entry.title bierze z _discovered_titles (czysty).
+                self._discovered_devices[info.address] = (
+                    f"{display_name} ({info.address})"
+                )
 
         if not self._discovered_devices:
             return self.async_show_form(

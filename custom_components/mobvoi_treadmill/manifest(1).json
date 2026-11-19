@@ -1,0 +1,19 @@
+{
+  "domain": "mobvoi_treadmill",
+  "name": "Mobvoi Home Treadmill Plus",
+  "bluetooth": [
+    {
+      "service_uuid": "00001826-0000-1000-8000-00805f9b34fb",
+      "local_name": "*Mobvoi*"
+    }
+  ],
+  "codeowners": ["@errorek404"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/errorek404/mobvoi_treadmill_ha_integration",
+  "issue_tracker": "https://github.com/errorek404/mobvoi_treadmill_ha_integration/issues",
+  "iot_class": "local_push",
+  "loggers": ["custom_components.mobvoi_treadmill"],
+  "requirements": ["bleak-retry-connector>=3.4.0"],
+  "version": "1.4.3"
+}

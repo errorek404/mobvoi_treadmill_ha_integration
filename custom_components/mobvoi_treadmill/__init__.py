@@ -1,18 +1,11 @@
 from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS, Platform
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, PLATFORMS
 from .coordinator import MobvoiTreadmillCoordinator
-
-PLATFORMS: list[Platform] = [
-    Platform.SENSOR,
-    Platform.SWITCH,
-    Platform.NUMBER,
-    Platform.BUTTON,
-]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -22,8 +15,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = MobvoiTreadmillCoordinator(hass, address, entry.title)
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    await coordinator.async_start()
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await coordinator.async_start()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        # Sprzątanie po częściowym setupie – nie zostawiamy wiszącego workera
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        await coordinator.async_stop()
+        raise
+
     return True
 
 

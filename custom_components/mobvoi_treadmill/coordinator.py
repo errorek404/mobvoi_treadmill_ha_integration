@@ -242,7 +242,7 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 belt_running = speed_kmh > 0.0
 
-            # target_speed: nie nadpisujemy „aktualną” w trakcie zatrzymywania
+            # target_speed: nie nadpisujemy „aktualną" w trakcie zatrzymywania
             target_speed = self.data.get("target_speed", MIN_SPEED)
             if (
                 now >= self._stopping_until

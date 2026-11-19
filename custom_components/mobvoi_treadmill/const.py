@@ -1,5 +1,13 @@
+from homeassistant.const import Platform
+
 DOMAIN = "mobvoi_treadmill"
-PLATFORMS = ["sensor", "switch", "number", "button"]
+
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.NUMBER,
+    Platform.BUTTON,
+]
 
 FTMS_SERVICE_UUID = "00001826-0000-1000-8000-00805f9b34fb"
 TREADMILL_DATA_UUID = "00002acd-0000-1000-8000-00805f9b34fb"

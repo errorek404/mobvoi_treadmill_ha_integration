@@ -6,6 +6,7 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -29,7 +30,7 @@ class MobvoiBeltSwitch(
     CoordinatorEntity[MobvoiTreadmillCoordinator], SwitchEntity
 ):
     _attr_has_entity_name = True
-    _attr_name = "Start pasa"
+    _attr_name = "Pas"
     _attr_icon = "mdi:run-fast"
 
     def __init__(
@@ -42,6 +43,7 @@ class MobvoiBeltSwitch(
             name=entry.title,
             manufacturer="Mobvoi",
             model="Home Treadmill Plus",
+            configuration_url="https://github.com/errorek404/mobvoi_treadmill_ha_integration",
         )
 
     @property
@@ -53,11 +55,9 @@ class MobvoiBeltSwitch(
         return bool(self.coordinator.data.get("belt_running", False))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        ok = await self.coordinator.async_send_start()
-        if not ok:
-            _LOGGER.warning("Nie udało się uruchomić pasa bieżni Mobvoi.")
+        if not await self.coordinator.async_send_start():
+            raise HomeAssistantError("Nie udało się uruchomić pasa bieżni Mobvoi.")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        ok = await self.coordinator.async_send_stop(emergency=False)
-        if not ok:
-            _LOGGER.warning("Nie udało się zatrzymać pasa bieżni Mobvoi.")
+        if not await self.coordinator.async_send_stop(emergency=False):
+            raise HomeAssistantError("Nie udało się zatrzymać pasa bieżni Mobvoi.")

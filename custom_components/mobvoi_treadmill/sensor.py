@@ -34,6 +34,7 @@ SENSORS: tuple[MobvoiSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfSpeed.KILOMETERS_PER_HOUR,
         device_class=SensorDeviceClass.SPEED,
         state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
     ),
     MobvoiSensorDescription(
         key="distance",
@@ -43,6 +44,7 @@ SENSORS: tuple[MobvoiSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfLength.METERS,
         device_class=SensorDeviceClass.DISTANCE,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=0,
     ),
     MobvoiSensorDescription(
         key="calories",
@@ -50,8 +52,11 @@ SENSORS: tuple[MobvoiSensorDescription, ...] = (
         name="Kalorie",
         icon="mdi:fire",
         native_unit_of_measurement=UnitOfEnergy.KILO_CALORIE,
-        device_class=SensorDeviceClass.ENERGY,
+        # UWAGA: SensorDeviceClass.ENERGY nie akceptuje "kcal" jako jednostki
+        # (dozwolone: Wh, kWh, MWh, mWh, GJ). Zostawiamy bez device_class,
+        # ale z state_class=TOTAL_INCREASING – statystyki i wykresy działają.
         state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=0,
     ),
     MobvoiSensorDescription(
         key="elapsed_time",
@@ -61,6 +66,7 @@ SENSORS: tuple[MobvoiSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.SECONDS,
         device_class=SensorDeviceClass.DURATION,
         state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=0,
     ),
 )
 
@@ -96,6 +102,7 @@ class MobvoiTreadmillSensor(
             name=entry.title,
             manufacturer="Mobvoi",
             model="Home Treadmill Plus",
+            configuration_url="https://github.com/errorek404/mobvoi_treadmill_ha_integration",
         )
 
     @property
