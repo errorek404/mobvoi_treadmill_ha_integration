@@ -2,20 +2,20 @@
   "config": {
     "step": {
       "user": {
-        "title": "Mobvoi Home Treadmill Plus",
-        "description": "Wybierz wykrytą bieżnię Bluetooth.",
+        "title": "Wybierz bieżnię Mobvoi",
+        "description": "Wybierz wykryte urządzenie Bluetooth FTMS z listy lub podaj adres MAC.",
         "data": {
-          "address": "Urządzenie Bluetooth"
+          "address": "Urządzenie Bluetooth / Adres MAC"
         }
       },
       "bluetooth_confirm": {
         "title": "Potwierdź bieżnię Mobvoi",
-        "description": "Czy chcesz dodać bieżnię {name} ({address}) do Home Assistant?"
+        "description": "Czy chcesz dodać bieżnię {name}?"
       }
     },
     "abort": {
-      "no_devices_found": "Nie znaleziono włączonej bieżni Mobvoi w zasięgu Bluetooth.",
-      "already_configured": "Ta bieżnia jest już skonfigurowana."
+      "no_devices_found": "Nie znaleziono bieżni Mobvoi. Upewnij się, że bieżnia jest wybudzona (ekran świeci).",
+      "already_configured": "To urządzenie jest już skonfigurowane."
     }
   }
 }

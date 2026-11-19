@@ -11,7 +11,7 @@ from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
 from homeassistant.components import bluetooth
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -21,11 +21,15 @@ from .const import (
     CMD_STOP_OR_PAUSE,
     CONTROL_POINT_UUID,
     DOMAIN,
-    STOP_PARAM_STOP,
+    MAX_SPEED,
+    MIN_SPEED,
     TREADMILL_DATA_UUID,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+CONTROL_TTL_SECONDS = 30.0
+MAX_ENFORCE_ATTEMPTS = 5
 
 
 class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -38,272 +42,317 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.address = address
         self.device_name = name
         self._client: BleakClient | None = None
-        self._connect_lock = asyncio.Lock()
         self._gatt_lock = asyncio.Lock()
-        self._cmd_queue: asyncio.Queue[tuple[str, float | None]] = asyncio.Queue()
-        self._worker_task: asyncio.Task | None = None
-        self._enforce_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
-        self._stopped = False
+        self._cmd_queue: asyncio.Queue[tuple[bytes, asyncio.Future[bool] | None]] = asyncio.Queue()
+        self._worker_task: asyncio.Task[None] | None = None
+        self._enforce_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._running = False
 
+        self._control_requested = False
+        self._control_granted_at: float = 0.0
         self._pending_target_speed: float | None = None
+        self._enforce_attempts: int = 0
         self._stopping_until: float = 0.0
-        self._control_requested: bool = False
 
         self.data: dict[str, Any] = {
             "connected": False,
-            "running": False,
             "speed": 0.0,
-            "target_speed": 1.0,
+            "target_speed": MIN_SPEED,
             "distance": 0,
-            "elapsed_time": 0,
             "calories": 0,
+            "elapsed_time": 0,
+            "belt_running": False,
         }
 
     async def async_start(self) -> None:
-        self._stopped = False
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = self.hass.async_create_task(self._command_worker())
-        if self._enforce_task is None or self._enforce_task.done():
-            self._enforce_task = self.hass.async_create_task(self._speed_enforcer_loop())
-        if self._reconnect_task is None or self._reconnect_task.done():
-            self._reconnect_task = self.hass.async_create_task(self._connection_loop())
+        self._running = True
+        self._worker_task = self.hass.async_create_task(self._command_worker())
+        self._enforce_task = self.hass.async_create_task(self._speed_enforcer_loop())
+        self._reconnect_task = self.hass.async_create_task(self._connection_loop())
 
     async def async_stop(self) -> None:
-        self._stopped = True
-        for task in (self._worker_task, self._enforce_task, self._reconnect_task):
-            if task and not task.done():
-                task.cancel()
+        self._running = False
+        tasks = [
+            t
+            for t in (self._worker_task, self._enforce_task, self._reconnect_task)
+            if t and not t.done()
+        ]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        self._worker_task = None
+        self._enforce_task = None
+        self._reconnect_task = None
+
+        while not self._cmd_queue.empty():
+            _, fut = self._cmd_queue.get_nowait()
+            if fut and not fut.done():
+                fut.set_result(False)
+            self._cmd_queue.task_done()
+
         if self._client and self._client.is_connected:
             try:
                 await self._client.disconnect()
             except BleakError:
                 pass
         self._client = None
+        self._control_requested = False
+
+    def _on_disconnect(self, _client: BleakClient) -> None:
+        _LOGGER.debug("Rozłączono z bieżnią %s", self.address)
+        self._control_requested = False
+        self._control_granted_at = 0.0
+        self._pending_target_speed = None
+        self._enforce_attempts = 0
+        new_data = dict(self.data)
+        new_data["connected"] = False
+        new_data["speed"] = 0.0
+        new_data["belt_running"] = False
+        self.async_set_updated_data(new_data)
 
     async def _connection_loop(self) -> None:
-        while not self._stopped:
-            if self._client is None or not self._client.is_connected:
-                await self._try_connect()
+        while self._running:
+            try:
+                if self._client is None or not self._client.is_connected:
+                    ble_device = bluetooth.async_ble_device_from_address(
+                        self.hass, self.address, connectable=True
+                    )
+                    if ble_device is not None:
+                        _LOGGER.debug("Łączenie z bieżnią %s...", self.address)
+                        client = await establish_connection(
+                            BleakClient,
+                            ble_device,
+                            self.device_name,
+                            disconnected_callback=self._on_disconnect,
+                        )
+                        self._client = client
+                        self._control_requested = False
+                        self._control_granted_at = 0.0
+                        await client.start_notify(
+                            TREADMILL_DATA_UUID, self._handle_treadmill_data
+                        )
+                        new_data = dict(self.data)
+                        new_data["connected"] = True
+                        self.async_set_updated_data(new_data)
+                        _LOGGER.info("Połączono z bieżnią %s", self.address)
+            except asyncio.CancelledError:
+                break
+            except Exception as err:
+                _LOGGER.debug("Błąd połączenia z bieżnią %s: %s", self.address, err)
+                self._client = None
+                self._control_requested = False
             await asyncio.sleep(5.0)
 
-    async def _try_connect(self) -> None:
-        if self._connect_lock.locked():
-            return
-        async with self._connect_lock:
-            if self._client and self._client.is_connected:
-                return
-            ble_device = bluetooth.async_ble_device_from_address(
-                self.hass, self.address, connectable=True
-            )
-            if not ble_device:
-                if self.data.get("connected"):
-                    self._update_state(connected=False, running=False, speed=0.0)
-                return
-            try:
-                client = await establish_connection(
-                    BleakClient,
-                    ble_device,
-                    self.device_name,
-                    disconnected_callback=self._on_disconnect,
-                )
-                self._client = client
-                self._control_requested = False
-                await client.start_notify(TREADMILL_DATA_UUID, self._handle_treadmill_data)
-                try:
-                    await client.start_notify(CONTROL_POINT_UUID, self._handle_control_point)
-                except BleakError:
-                    pass
-                self._update_state(connected=True)
-                _LOGGER.info("Połączono z bieżnią Mobvoi (%s)", self.address)
-            except Exception as err:
-                _LOGGER.debug("Nieudana próba połączenia z %s: %s", self.address, err)
-                self._client = None
-                if self.data.get("connected"):
-                    self._update_state(connected=False, running=False, speed=0.0)
-
-    @callback
-    def _on_disconnect(self, _client: BleakClient) -> None:
-        _LOGGER.info("Rozłączono z bieżnią Mobvoi (%s)", self.address)
-        self._client = None
-        self._control_requested = False
-        self._pending_target_speed = None
-        self._update_state(connected=False, running=False, speed=0.0)
-
-    @callback
-    def _handle_control_point(self, _sender: Any, data: bytearray) -> None:
-        _LOGGER.debug("FTMS Control Point response: %s", data.hex())
-
-    @callback
     def _handle_treadmill_data(self, _sender: Any, data: bytearray) -> None:
         if len(data) < 4:
             return
-        flags = struct.unpack_from("<H", data, 0)[0]
-        offset = 2
+        try:
+            flags = struct.unpack_from("<H", data, 0)[0]
+            offset = 2
 
-        speed_raw = struct.unpack_from("<H", data, offset)[0]
-        speed_kmh = round(speed_raw / 100.0, 2)
-        offset += 2
-
-        # Bit 1: Average Speed present (uint16)
-        if flags & (1 << 1) and len(data) >= offset + 2:
+            speed_raw = struct.unpack_from("<H", data, offset)[0]
+            speed_kmh = round(speed_raw / 100.0, 2)
             offset += 2
 
-        # Bit 2: Total Distance present (uint24 in meters)
-        distance = self.data["distance"]
-        if flags & (1 << 2) and len(data) >= offset + 3:
-            b0, b1, b2 = data[offset], data[offset + 1], data[offset + 2]
-            distance = b0 | (b1 << 8) | (b2 << 16)
-            offset += 3
+            if flags & (1 << 1):
+                offset += 2
 
-        # Bit 3: Inclination & Ramp Angle (2x int16)
-        if flags & (1 << 3) and len(data) >= offset + 4:
-            offset += 4
-
-        # Bit 4: Elevation Gain (2x uint16)
-        if flags & (1 << 4) and len(data) >= offset + 4:
-            offset += 4
-
-        # Bit 5: Instantaneous Pace (uint8)
-        if flags & (1 << 5) and len(data) >= offset + 1:
-            offset += 1
-
-        # Bit 6: Average Pace (uint8)
-        if flags & (1 << 6) and len(data) >= offset + 1:
-            offset += 1
-
-        # Bit 7: Expended Energy (Total uint16, Per Hour uint16, Per Min uint8)
-        calories = self.data["calories"]
-        if flags & (1 << 7) and len(data) >= offset + 2:
-            calories = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-            if len(data) >= offset + 3:
+            distance_m = self.data.get("distance", 0)
+            if flags & (1 << 2):
+                if offset + 3 <= len(data):
+                    d_bytes = data[offset : offset + 3]
+                    distance_m = d_bytes[0] | (d_bytes[1] << 8) | (d_bytes[2] << 16)
                 offset += 3
 
-        # Bit 8: Heart Rate (uint8)
-        if flags & (1 << 8) and len(data) >= offset + 1:
-            offset += 1
+            if flags & (1 << 3):
+                offset += 2
+            if flags & (1 << 4):
+                offset += 2
+            if flags & (1 << 5):
+                offset += 4
+            if flags & (1 << 6):
+                offset += 2
 
-        # Bit 9: Metabolic Equivalent (uint8)
-        if flags & (1 << 9) and len(data) >= offset + 1:
-            offset += 1
+            calories_kcal = self.data.get("calories", 0)
+            if flags & (1 << 7):
+                if offset + 2 <= len(data):
+                    calories_kcal = struct.unpack_from("<H", data, offset)[0]
+                offset += 5
 
-        # Bit 10: Elapsed Time (uint16 seconds)
-        elapsed_time = self.data["elapsed_time"]
-        if flags & (1 << 10) and len(data) >= offset + 2:
-            elapsed_time = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
+            if flags & (1 << 8):
+                offset += 1
+            if flags & (1 << 9):
+                offset += 1
 
-        now = time.monotonic()
-        if now < self._stopping_until:
-            running = False
-        else:
-            running = speed_kmh > 0.0
+            elapsed_s = self.data.get("elapsed_time", 0)
+            if flags & (1 << 10):
+                if offset + 2 <= len(data):
+                    elapsed_s = struct.unpack_from("<H", data, offset)[0]
+                offset += 2
 
-        target_speed = self.data["target_speed"]
-        if running and self._pending_target_speed is None and speed_kmh >= 1.0:
-            target_speed = round(speed_kmh, 1)
+            now = time.monotonic()
+            if now < self._stopping_until:
+                belt_running = False
+            else:
+                belt_running = speed_kmh > 0.0
 
-        self._update_state(
-            connected=True,
-            running=running,
-            speed=speed_kmh,
-            target_speed=target_speed,
-            distance=distance,
-            elapsed_time=elapsed_time,
-            calories=calories,
-        )
+            target_speed = self.data.get("target_speed", MIN_SPEED)
+            if speed_kmh >= MIN_SPEED and self._pending_target_speed is None:
+                target_speed = speed_kmh
 
-    def _update_state(self, **kwargs: Any) -> None:
-        new_data = {**self.data, **kwargs}
-        self.async_set_updated_data(new_data)
+            if (
+                self._pending_target_speed is not None
+                and abs(speed_kmh - self._pending_target_speed) <= 0.15
+            ):
+                self._pending_target_speed = None
+                self._enforce_attempts = 0
 
-    def _clear_queue(self) -> None:
-        while not self._cmd_queue.empty():
-            try:
-                self._cmd_queue.get_nowait()
-                self._cmd_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+            new_data = {
+                "connected": True,
+                "speed": speed_kmh,
+                "target_speed": target_speed,
+                "distance": distance_m,
+                "calories": calories_kcal,
+                "elapsed_time": elapsed_s,
+                "belt_running": belt_running,
+            }
+            self.async_set_updated_data(new_data)
+        except Exception as err:
+            _LOGGER.debug("Błąd parsowania pakietu FTMS: %s", err)
 
-    async def async_send_start(self) -> None:
-        self._stopping_until = 0.0
-        await self._cmd_queue.put(("start", None))
-
-    async def async_send_stop(self, emergency: bool = False) -> None:
-        self._pending_target_speed = None
-        self._stopping_until = time.monotonic() + 4.5
-        self._clear_queue()
-        self._update_state(running=False)
-        if emergency and self._client and self._client.is_connected:
-            await self._write_ftms(bytes([CMD_STOP_OR_PAUSE, STOP_PARAM_STOP]))
-        else:
-            await self._cmd_queue.put(("stop", None))
-
-    async def async_set_speed(self, speed_kmh: float) -> None:
-        clamped = round(max(1.0, min(12.0, speed_kmh)), 1)
-        self._stopping_until = 0.0
-        self._pending_target_speed = clamped
-        self._update_state(target_speed=clamped)
-        await self._cmd_queue.put(("speed", clamped))
-
-    async def _write_ftms(self, payload: bytes) -> bool:
-        if not self._client or not self._client.is_connected:
-            return False
+    async def _write_control_point(self, payload: bytes) -> bool:
         async with self._gatt_lock:
+            if not self._client or not self._client.is_connected:
+                self._control_requested = False
+                return False
             try:
-                if not self._control_requested:
+                now = time.monotonic()
+                if (
+                    not self._control_requested
+                    or (now - self._control_granted_at) > CONTROL_TTL_SECONDS
+                ):
                     await self._client.write_gatt_char(
                         CONTROL_POINT_UUID, bytes([CMD_REQUEST_CONTROL]), response=True
                     )
                     self._control_requested = True
-                    await asyncio.sleep(0.20)
+                    self._control_granted_at = time.monotonic()
+                    await asyncio.sleep(0.25)
+
                 await self._client.write_gatt_char(
                     CONTROL_POINT_UUID, payload, response=True
                 )
                 await asyncio.sleep(0.25)
                 return True
             except Exception as err:
-                _LOGGER.debug("Błąd zapisu FTMS (%s): %s", payload.hex(), err)
+                _LOGGER.warning("Nieudany zapis komendy FTMS (%s): %s", payload.hex(), err)
                 self._control_requested = False
+                self._control_granted_at = 0.0
                 return False
 
-    async def _command_worker(self) -> None:
-        while not self._stopped:
-            cmd, val = await self._cmd_queue.get()
-            try:
-                if not self._client or not self._client.is_connected:
-                    await self._try_connect()
-                if not self._client or not self._client.is_connected:
-                    continue
+    async def _enqueue_cmd(self, payload: bytes) -> bool:
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        await self._cmd_queue.put((payload, fut))
+        return await fut
 
-                if cmd == "start":
-                    await self._write_ftms(bytes([CMD_START_OR_RESUME]))
-                elif cmd == "stop":
-                    await self._write_ftms(bytes([CMD_STOP_OR_PAUSE, STOP_PARAM_STOP]))
-                elif cmd == "speed" and val is not None:
-                    if self.data.get("speed", 0.0) == 0.0:
-                        await self._write_ftms(bytes([CMD_START_OR_RESUME]))
-                        await asyncio.sleep(1.5)
-                    raw_val = int(round(val * 100))
-                    payload = struct.pack("<BH", CMD_SET_TARGET_SPEED, raw_val)
-                    await self._write_ftms(payload)
-            finally:
-                self._cmd_queue.task_done()
+    async def _command_worker(self) -> None:
+        while self._running:
+            try:
+                payload, fut = await self._cmd_queue.get()
+                try:
+                    ok = await self._write_control_point(payload)
+                    if fut and not fut.done():
+                        fut.set_result(ok)
+                except Exception:
+                    if fut and not fut.done():
+                        fut.set_result(False)
+                finally:
+                    self._cmd_queue.task_done()
+            except asyncio.CancelledError:
+                break
 
     async def _speed_enforcer_loop(self) -> None:
-        while not self._stopped:
-            await asyncio.sleep(1.2)
-            target = self._pending_target_speed
-            if target is None:
-                continue
-            if not self._client or not self._client.is_connected:
-                continue
-            current = self.data.get("speed", 0.0)
-            if abs(current - target) <= 0.15:
-                self._pending_target_speed = None
-                continue
-            if current > 0.0 and self._cmd_queue.empty():
-                raw_val = int(round(target * 100))
-                payload = struct.pack("<BH", CMD_SET_TARGET_SPEED, raw_val)
-                await self._write_ftms(payload)
+        while self._running:
+            try:
+                await asyncio.sleep(1.2)
+                target = self._pending_target_speed
+                if target is None:
+                    self._enforce_attempts = 0
+                    continue
+                if not self.data.get("connected"):
+                    continue
+
+                current_speed = self.data.get("speed", 0.0)
+                if abs(current_speed - target) <= 0.15:
+                    self._pending_target_speed = None
+                    self._enforce_attempts = 0
+                    continue
+
+                if self._enforce_attempts >= MAX_ENFORCE_ATTEMPTS:
+                    _LOGGER.warning(
+                        "Przekroczono limit %d prób ustawienia prędkości %.1f km/h (aktualna: %.1f km/h). Anulowanie.",
+                        MAX_ENFORCE_ATTEMPTS,
+                        target,
+                        current_speed,
+                    )
+                    self._pending_target_speed = None
+                    self._enforce_attempts = 0
+                    continue
+
+                self._enforce_attempts += 1
+                if current_speed == 0.0:
+                    await self._enqueue_cmd(bytes([CMD_START_OR_RESUME]))
+                else:
+                    speed_raw = int(round(target * 100))
+                    payload = struct.pack("<BH", CMD_SET_TARGET_SPEED, speed_raw)
+                    await self._enqueue_cmd(payload)
+            except asyncio.CancelledError:
+                break
+
+    async def async_send_start(self) -> bool:
+        self._stopping_until = 0.0
+        new_data = dict(self.data)
+        new_data["belt_running"] = True
+        self.async_set_updated_data(new_data)
+        return await self._enqueue_cmd(bytes([CMD_START_OR_RESUME]))
+
+    async def async_send_stop(self, emergency: bool = False) -> bool:
+        self._pending_target_speed = None
+        self._enforce_attempts = 0
+        self._stopping_until = time.monotonic() + 4.5
+
+        while not self._cmd_queue.empty():
+            _, fut = self._cmd_queue.get_nowait()
+            if fut and not fut.done():
+                fut.set_result(False)
+            self._cmd_queue.task_done()
+
+        new_data = dict(self.data)
+        new_data["belt_running"] = False
+        self.async_set_updated_data(new_data)
+
+        payload = bytes([CMD_STOP_OR_PAUSE, 0x01])
+        if emergency:
+            return await self._write_control_point(payload)
+        return await self._enqueue_cmd(payload)
+
+    async def async_set_target_speed(self, speed_kmh: float) -> bool:
+        clamped = max(MIN_SPEED, min(MAX_SPEED, round(speed_kmh, 1)))
+        self._stopping_until = 0.0
+        self._pending_target_speed = clamped
+        self._enforce_attempts = 0
+
+        new_data = dict(self.data)
+        new_data["target_speed"] = clamped
+        new_data["belt_running"] = True
+        self.async_set_updated_data(new_data)
+
+        if self.data.get("speed", 0.0) == 0.0:
+            await self._enqueue_cmd(bytes([CMD_START_OR_RESUME]))
+
+        speed_raw = int(round(clamped * 100))
+        payload = struct.pack("<BH", CMD_SET_TARGET_SPEED, speed_raw)
+        return await self._enqueue_cmd(payload)
