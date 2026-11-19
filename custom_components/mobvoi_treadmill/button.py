@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -9,42 +12,36 @@ from .coordinator import MobvoiTreadmillCoordinator
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator: MobvoiTreadmillCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
-        [
-            MobvoiStartButton(coordinator, entry),
-            MobvoiStopButton(coordinator, entry),
-        ]
-    )
+    async_add_entities([MobvoiWakeButton(coordinator, entry)])
 
 
-class MobvoiBaseButton(CoordinatorEntity, ButtonEntity):
-    def __init__(self, coordinator, entry, key, name, icon):
+class MobvoiWakeButton(CoordinatorEntity[MobvoiTreadmillCoordinator], ButtonEntity):
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: MobvoiTreadmillCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
         super().__init__(coordinator)
-        self._attr_name = f"Mobvoi {name}"
-        self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_icon = icon
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "Mobvoi Home Treadmill Plus",
-            "manufacturer": "Mobvoi",
-            "model": "T4225 Plus",
-        }
+        self._attr_name = "Wybudź bieżnię"
+        self._attr_unique_id = f"{entry.entry_id}_wake_button"
+        self._attr_icon = "mdi:power-standby"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Mobvoi Home Treadmill Plus",
+            manufacturer="Mobvoi",
+            model="T4225 Plus",
+        )
 
-
-class MobvoiStartButton(MobvoiBaseButton):
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "start", "Start", "mdi:play")
-
-    async def async_press(self) -> None:
-        await self.coordinator.async_start()
-
-
-class MobvoiStopButton(MobvoiBaseButton):
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "stop", "Stop", "mdi:stop")
+    @property
+    def available(self) -> bool:
+        return bool(self.coordinator.data.get("connected", False))
 
     async def async_press(self) -> None:
-        await self.coordinator.async_stop()
+        await self.coordinator.async_wake_up()
