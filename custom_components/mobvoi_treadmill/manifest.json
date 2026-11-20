@@ -4,7 +4,7 @@
   "bluetooth": [
     {
       "service_uuid": "00001826-0000-1000-8000-00805f9b34fb",
-      "local_name": "*Mobvoi*"
+      "local_name": "Mobvoi*"
     },
     {
       "service_uuid": "00001826-0000-1000-8000-00805f9b34fb",
