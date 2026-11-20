@@ -19,5 +19,5 @@
   "iot_class": "local_push",
   "loggers": ["custom_components.mobvoi_treadmill"],
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.2"
 }
