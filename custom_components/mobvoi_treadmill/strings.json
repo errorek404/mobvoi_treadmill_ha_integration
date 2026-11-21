@@ -2,20 +2,40 @@
   "config": {
     "step": {
       "user": {
-        "title": "Wybierz bieżnię Mobvoi",
-        "description": "Wybierz wykryte urządzenie Bluetooth FTMS z listy lub podaj adres MAC.",
+        "title": "Select Mobvoi Home Treadmill Plus",
+        "description": "Choose a discovered Bluetooth FTMS treadmill from the list or enter its MAC address.",
         "data": {
-          "address": "Urządzenie Bluetooth / Adres MAC"
+          "address": "Bluetooth Device / MAC Address"
         }
       },
       "bluetooth_confirm": {
-        "title": "Potwierdź bieżnię Mobvoi",
-        "description": "Czy chcesz dodać bieżnię {name}?"
+        "title": "Confirm Mobvoi Home Treadmill Plus",
+        "description": "Do you want to add {name}?"
       }
     },
+    "error": {
+      "invalid_mac": "Invalid MAC address format (expected AA:BB:CC:DD:EE:FF)."
+    },
     "abort": {
-      "no_devices_found": "Nie znaleziono bieżni Mobvoi. Upewnij się, że bieżnia jest wybudzona (ekran świeci).",
-      "already_configured": "To urządzenie jest już skonfigurowane."
+      "no_devices_found": "No Mobvoi treadmill found. Make sure the treadmill is awake (display is on).",
+      "already_configured": "This device is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "speed": { "name": "Speed" },
+      "distance": { "name": "Distance" },
+      "calories": { "name": "Calories" },
+      "elapsed_time": { "name": "Elapsed time" }
+    },
+    "switch": {
+      "belt": { "name": "Belt" }
+    },
+    "number": {
+      "target_speed": { "name": "Target speed" }
+    },
+    "button": {
+      "emergency_stop": { "name": "Emergency stop" }
     }
   }
 }

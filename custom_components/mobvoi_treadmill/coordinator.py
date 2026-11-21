@@ -16,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     CMD_REQUEST_CONTROL,
+    CMD_RESPONSE_CODE,
     CMD_SET_TARGET_SPEED,
     CMD_START_OR_RESUME,
     CMD_STOP_OR_PAUSE,
@@ -23,6 +24,7 @@ from .const import (
     DOMAIN,
     MAX_SPEED,
     MIN_SPEED,
+    RESULT_SUCCESS,
     TREADMILL_DATA_UUID,
 )
 
@@ -31,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 CONTROL_TTL_SECONDS = 30.0
 MAX_ENFORCE_ATTEMPTS = 5
 CMD_TIMEOUT_SECONDS = 5.0
-# Backoff reconnectu (sekundy): rośnie przy kolejnych niepowodzeniach, resetuje się po sukcesie
+INDICATION_TIMEOUT_SECONDS = 2.0
 RECONNECT_BACKOFF = (5.0, 10.0, 30.0, 60.0)
 
 
@@ -46,7 +48,9 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_name = name
         self._client: BleakClient | None = None
         self._gatt_lock = asyncio.Lock()
-        self._cmd_queue: asyncio.Queue[tuple[bytes, asyncio.Future[bool] | None]] = asyncio.Queue()
+        self._cmd_queue: asyncio.Queue[tuple[bytes, asyncio.Future[bool] | None]] = (
+            asyncio.Queue()
+        )
         self._worker_task: asyncio.Task[None] | None = None
         self._enforce_task: asyncio.Task[None] | None = None
         self._reconnect_task: asyncio.Task[None] | None = None
@@ -59,6 +63,10 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enforce_attempts: int = 0
         self._stopping_until: float = 0.0
 
+        self._expected_opcode: int | None = None
+        self._indication_event = asyncio.Event()
+        self._indication_result: int | None = None
+
         self.data: dict[str, Any] = {
             "connected": False,
             "speed": 0.0,
@@ -70,7 +78,6 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     async def _async_update_data(self) -> dict[str, Any]:
-        # Dana jest pushowana przez _handle_treadmill_data; tutaj tylko oddajemy bieżący stan.
         return self.data
 
     async def async_start(self) -> None:
@@ -110,7 +117,7 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._control_requested = False
 
     def _on_disconnect(self, _client: BleakClient) -> None:
-        _LOGGER.debug("Rozłączono z bieżnią %s", self.address)
+        _LOGGER.debug("Disconnected from treadmill %s", self.address)
         self._control_requested = False
         self._control_granted_at = 0.0
         self._pending_target_speed = None
@@ -121,6 +128,14 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         new_data["belt_running"] = False
         self.async_set_updated_data(new_data)
 
+    def _handle_control_point_indication(self, _sender: Any, data: bytearray) -> None:
+        if len(data) >= 3 and data[0] == CMD_RESPONSE_CODE:
+            req_opcode = data[1]
+            result_code = data[2]
+            if self._expected_opcode == req_opcode:
+                self._indication_result = result_code
+                self._indication_event.set()
+
     async def _connection_loop(self) -> None:
         while self._running:
             try:
@@ -129,7 +144,7 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self.hass, self.address, connectable=True
                     )
                     if ble_device is not None:
-                        _LOGGER.debug("Łączenie z bieżnią %s...", self.address)
+                        _LOGGER.debug("Connecting to treadmill %s...", self.address)
                         client = await establish_connection(
                             BleakClient,
                             ble_device,
@@ -139,22 +154,32 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._client = client
                         self._control_requested = False
                         self._control_granted_at = 0.0
+
+                        try:
+                            await client.start_notify(
+                                CONTROL_POINT_UUID,
+                                self._handle_control_point_indication,
+                            )
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Control point indications not supported/failed: %s",
+                                err,
+                            )
+
                         await client.start_notify(
                             TREADMILL_DATA_UUID, self._handle_treadmill_data
                         )
                         new_data = dict(self.data)
                         new_data["connected"] = True
                         self.async_set_updated_data(new_data)
-                        _LOGGER.info("Połączono z bieżnią %s", self.address)
-                        # Sukces — resetujemy backoff
+                        _LOGGER.info("Connected to treadmill %s", self.address)
                         self._reconnect_backoff_idx = 0
             except asyncio.CancelledError:
                 break
             except Exception as err:
-                _LOGGER.debug("Błąd połączenia z bieżnią %s: %s", self.address, err)
+                _LOGGER.debug("Connection error for %s: %s", self.address, err)
                 self._client = None
                 self._control_requested = False
-                # Backoff rośnie tylko przy faktycznym niepowodzeniu
                 if self._reconnect_backoff_idx < len(RECONNECT_BACKOFF) - 1:
                     self._reconnect_backoff_idx += 1
 
@@ -162,16 +187,20 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await asyncio.sleep(delay)
 
     def _handle_treadmill_data(self, _sender: Any, data: bytearray) -> None:
-        if len(data) < 4:
+        if len(data) < 2:
             return
         try:
             flags = struct.unpack_from("<H", data, 0)[0]
             offset = 2
 
-            # Instantaneous Speed (uint16, 0.01 km/h) — obowiązkowe
-            speed_raw = struct.unpack_from("<H", data, offset)[0]
-            speed_kmh = round(speed_raw / 100.0, 2)
-            offset += 2
+            # Bit 0 == 0: Instantaneous Speed obecne; Bit 0 == 1: "More Data" (brak prędkości)
+            speed_kmh = self.data.get("speed", 0.0)
+            if not (flags & (1 << 0)):
+                if offset + 2 > len(data):
+                    return
+                speed_raw = struct.unpack_from("<H", data, offset)[0]
+                speed_kmh = round(speed_raw / 100.0, 2)
+                offset += 2
 
             # Average Speed (uint16)
             if flags & (1 << 1):
@@ -185,34 +214,34 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     distance_m = d_bytes[0] | (d_bytes[1] << 8) | (d_bytes[2] << 16)
                 offset += 3
 
-            # Inclination (sint16) + Ramp Angle Setting (sint16) = 4 B
+            # Inclination + Ramp Angle Setting = 4 B
             if flags & (1 << 3):
                 offset += 4
 
-            # Positive/Negative Elevation Gain (uint16 x2) = 4 B
+            # Positive/Negative Elevation Gain = 4 B
             if flags & (1 << 4):
                 offset += 4
 
-            # Instantaneous Pace (uint8) = 1 B
+            # Instantaneous Pace = 1 B
             if flags & (1 << 5):
                 offset += 1
 
-            # Average Pace (uint8) = 1 B
+            # Average Pace = 1 B
             if flags & (1 << 6):
                 offset += 1
 
-            # Expended Energy (uint16 total + uint16 per hour + uint8 per minute) = 5 B
+            # Expended Energy = 5 B
             calories_kcal = self.data.get("calories", 0)
             if flags & (1 << 7):
                 if offset + 2 <= len(data):
                     calories_kcal = struct.unpack_from("<H", data, offset)[0]
                 offset += 5
 
-            # Heart Rate (uint8) = 1 B
+            # Heart Rate = 1 B
             if flags & (1 << 8):
                 offset += 1
 
-            # Metabolic Equivalent (uint8) = 1 B
+            # Metabolic Equivalent = 1 B
             if flags & (1 << 9):
                 offset += 1
 
@@ -223,26 +252,12 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     elapsed_s = struct.unpack_from("<H", data, offset)[0]
                 offset += 2
 
-            # Remaining Time (uint16, s)
-            if flags & (1 << 11):
-                offset += 2
-
-            # Force on Belt (sint16) + Power Output (sint16) = 4 B
-            if flags & (1 << 12):
-                offset += 4
-
-            # Diagnostyka: bity 13–15 zarezerwowane
-            unknown = flags & 0xE000
-            if unknown:
-                _LOGGER.debug("Nieznane bity flag FTMS: 0x%04X", unknown)
-
             now = time.monotonic()
             if now < self._stopping_until:
                 belt_running = False
             else:
                 belt_running = speed_kmh > 0.0
 
-            # target_speed: nie nadpisujemy „aktualną" w trakcie zatrzymywania
             target_speed = self.data.get("target_speed", MIN_SPEED)
             if (
                 now >= self._stopping_until
@@ -269,7 +284,35 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
             self.async_set_updated_data(new_data)
         except Exception as err:
-            _LOGGER.warning("Błąd parsowania pakietu FTMS: %s", err)
+            _LOGGER.warning("Error parsing FTMS packet: %s", err)
+
+    async def _send_with_indication(self, payload: bytes) -> bool:
+        assert self._client is not None
+        opcode = payload[0]
+        self._expected_opcode = opcode
+        self._indication_result = None
+        self._indication_event.clear()
+
+        await self._client.write_gatt_char(
+            CONTROL_POINT_UUID, payload, response=True
+        )
+        try:
+            await asyncio.wait_for(
+                self._indication_event.wait(), timeout=INDICATION_TIMEOUT_SECONDS
+            )
+            if self._indication_result != RESULT_SUCCESS:
+                _LOGGER.warning(
+                    "FTMS command 0x%02X rejected with code: 0x%02X",
+                    opcode,
+                    self._indication_result or 0,
+                )
+                return False
+            return True
+        except asyncio.TimeoutError:
+            _LOGGER.debug("No FTMS indication received for opcode 0x%02X", opcode)
+            return True
+        finally:
+            self._expected_opcode = None
 
     async def _write_control_point(self, payload: bytes) -> bool:
         async with self._gatt_lock:
@@ -282,20 +325,23 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     not self._control_requested
                     or (now - self._control_granted_at) > CONTROL_TTL_SECONDS
                 ):
-                    await self._client.write_gatt_char(
-                        CONTROL_POINT_UUID, bytes([CMD_REQUEST_CONTROL]), response=True
-                    )
+                    if not await self._send_with_indication(
+                        bytes([CMD_REQUEST_CONTROL])
+                    ):
+                        self._control_requested = False
+                        return False
                     self._control_requested = True
                     self._control_granted_at = time.monotonic()
-                    await asyncio.sleep(0.25)
+                    await asyncio.sleep(0.15)
 
-                await self._client.write_gatt_char(
-                    CONTROL_POINT_UUID, payload, response=True
-                )
-                await asyncio.sleep(0.25)
-                return True
+                ok = await self._send_with_indication(payload)
+                if not ok:
+                    self._control_requested = False
+                    self._control_granted_at = 0.0
+                await asyncio.sleep(0.15)
+                return ok
             except Exception as err:
-                _LOGGER.warning("Nieudany zapis komendy FTMS (%s): %s", payload.hex(), err)
+                _LOGGER.warning("Failed writing FTMS command (%s): %s", payload.hex(), err)
                 self._control_requested = False
                 self._control_granted_at = 0.0
                 return False
@@ -311,7 +357,7 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except asyncio.TimeoutError:
             if not fut.done():
                 fut.cancel()
-            _LOGGER.warning("Timeout wysyłania komendy FTMS (%s)", payload.hex())
+            _LOGGER.warning("Timeout sending FTMS command (%s)", payload.hex())
             return False
 
     async def _command_worker(self) -> None:
@@ -321,8 +367,6 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 payload, fut = await self._cmd_queue.get()
                 current_fut = fut
                 try:
-                    # Blokada komend, które przyszły po STOP a przed upływem _stopping_until
-                    # (wyjątek: same komendy STOP mogą przejść — na wypadek podwójnego stopu)
                     if (
                         time.monotonic() < self._stopping_until
                         and payload
@@ -342,7 +386,6 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     current_fut = None
                     self._cmd_queue.task_done()
             except asyncio.CancelledError:
-                # Nie zostawiamy wiszącego future — wołający nie może czekać wiecznie
                 if current_fut and not current_fut.done():
                     current_fut.set_result(False)
                 break
@@ -358,7 +401,6 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not self.data.get("connected"):
                     continue
                 if time.monotonic() < self._stopping_until:
-                    # Trwa zatrzymywanie — nie wymuszamy prędkości
                     continue
 
                 current_speed = self.data.get("speed", 0.0)
@@ -369,8 +411,7 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if self._enforce_attempts >= MAX_ENFORCE_ATTEMPTS:
                     _LOGGER.warning(
-                        "Przekroczono limit %d prób ustawienia prędkości %.1f km/h "
-                        "(aktualna: %.1f km/h). Anulowanie.",
+                        "Exceeded %d attempts to set speed %.1f km/h (current: %.1f km/h)",
                         MAX_ENFORCE_ATTEMPTS,
                         target,
                         current_speed,
@@ -397,7 +438,6 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         ok = await self._enqueue_cmd(bytes([CMD_START_OR_RESUME]))
         if not ok:
-            # Cofamy optymistyczny stan, skoro komenda się nie powiodła
             rollback = dict(self.data)
             rollback["belt_running"] = False
             self.async_set_updated_data(rollback)
@@ -425,6 +465,9 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_set_target_speed(self, speed_kmh: float) -> bool:
         clamped = max(MIN_SPEED, min(MAX_SPEED, round(speed_kmh, 1)))
+        prev_target = self.data.get("target_speed", MIN_SPEED)
+        was_running = self.data.get("belt_running", False)
+
         self._stopping_until = 0.0
         self._pending_target_speed = clamped
         self._enforce_attempts = 0
@@ -435,8 +478,21 @@ class MobvoiTreadmillCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.async_set_updated_data(new_data)
 
         if self.data.get("speed", 0.0) == 0.0:
-            await self._enqueue_cmd(bytes([CMD_START_OR_RESUME]))
+            if not await self._enqueue_cmd(bytes([CMD_START_OR_RESUME])):
+                self._pending_target_speed = None
+                rollback = dict(self.data)
+                rollback["target_speed"] = prev_target
+                rollback["belt_running"] = was_running
+                self.async_set_updated_data(rollback)
+                return False
 
         speed_raw = int(round(clamped * 100))
         payload = struct.pack("<BH", CMD_SET_TARGET_SPEED, speed_raw)
-        return await self._enqueue_cmd(payload)
+        ok = await self._enqueue_cmd(payload)
+        if not ok:
+            self._pending_target_speed = None
+            rollback = dict(self.data)
+            rollback["target_speed"] = prev_target
+            rollback["belt_running"] = was_running
+            self.async_set_updated_data(rollback)
+        return ok

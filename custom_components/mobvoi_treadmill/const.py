@@ -1,6 +1,6 @@
 from homeassistant.const import Platform
 
-DOMAIN = "mobvoi_treadmill"
+DOMAIN = "mobvoi_treadmill_plus"
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
@@ -17,6 +17,8 @@ CMD_REQUEST_CONTROL = 0x00
 CMD_SET_TARGET_SPEED = 0x02
 CMD_START_OR_RESUME = 0x07
 CMD_STOP_OR_PAUSE = 0x08
+CMD_RESPONSE_CODE = 0x80
+RESULT_SUCCESS = 0x01
 
 MIN_SPEED = 1.0
 MAX_SPEED = 12.0
